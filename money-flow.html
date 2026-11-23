@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Money Flow - Seller Tracker</title>
+<style>
+:root{--bg:#070b16;--card:#0d1426;--line:#1b3a4a;--txt:#e6ecff;--mut:#8f9bc0;--cy:#22e0ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:480px;margin:0 auto;padding:16px}
+h1{font-size:26px;margin:4px 0}
+p.sub{color:var(--mut);margin:0 0 14px}
+.chips{display:flex;gap:8px;overflow-x:auto;padding-bottom:6px}
+.chip{flex:0 0 auto;padding:8px 18px;border-radius:999px;border:1.5px solid var(--line);background:transparent;color:var(--txt);font-size:16px;cursor:pointer}
+.chip[aria-pressed=true]{border-color:var(--cy);background:#0f2a3a;color:var(--cy)}
+.card{margin-top:12px;border:1.5px solid var(--line);border-radius:20px;background:var(--card);padding:10px}
+canvas{width:100%;display:block;touch-action:manipulation}
+.hint{color:var(--mut);font-size:14px;margin:4px 8px 8px}
+.info{margin:8px;padding:10px 12px;border-radius:12px;background:#111b33;min-height:44px;font-size:15px;line-height:1.4}
+.play{background:none;border:0;color:var(--cy);font-size:18px;padding:10px 8px;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Money Flow</h1>
+  <p class="sub">Where your sales come from and where the money goes</p>
+  <div class="chips" id="chips" role="group" aria-label="Month"></div>
+  <div class="card">
+    <p class="hint">Sales flow in from the left, costs flow out to the right. Tap a bubble to burst it, or play the months.</p>
+    <canvas id="cv" role="img" aria-label="Money flow diagram showing sales coming in and costs going out"></canvas>
+    <div class="info" id="info" aria-live="polite"></div>
+    <button class="play" id="play">&#9654; Watch the months</button>
+  </div>
+</div>
+
+<script>
+/*
+  HOW TO CONNECT YOUR REAL DATA
+  Build an object in this shape from your sales and expenses (one number per month,
+  same order as `months`), then call SellerFlow.setData(yourObject).
+    income: sales per channel   (money coming in)
+    costs : spending per category (money going out)
+*/
+(function () {
+  var DATA = {
+    months: ["Jul", "Aug", "Sep", "Oct", "Nov"],
+    income: {
+      "WhatsApp":  [30500, 34200, 36800, 41000, 28000],
+      "Instagram": [9800, 11200, 12400, 13500, 9000],
+      "Facebook":  [6100, 5400, 7200, 8100, 6500],
+      "TikTok":    [2000, 3500, 4800, 6200, 4500]
+    },
+    costs: {
+      "Stock":     [24000, 26500, 28500, 30500, 16500],
+      "Delivery":  [4800, 5200, 5600, 6100, 3600],
+      "Ads":       [2500, 3000, 3600, 4200, 2800],
+      "Packaging": [1400, 1600, 1700, 1900, 1200],
+      "Transport": [2200, 2300, 2600, 2800, 1500],
+      "Other":     [1800, 2100, 1900, 2500, 1400]
+    }
+  };
+
+  var COL = { "WhatsApp": "#25d9a0", "Instagram": "#c070ff", "Facebook": "#4d8dff", "TikTok": "#22e0ff",
+              "Stock": "#22e0ff", "Delivery": "#ff5d7a", "Ads": "#ffb454", "Packaging": "#9b7bff",
+              "Transport": "#ff7ab8", "Other": "#8f9bc0" };
+  var FALLBACK = ["#22e0ff", "#c070ff", "#25d9a0", "#ffb454", "#ff5d7a", "#4d8dff", "#8f9bc0"];
+  var ICON = { "WhatsApp": "💬", "Instagram": "📸", "Facebook": "👍", "TikTok": "🎵",
+               "Stock": "📦", "Delivery": "🛵", "Ads": "📣", "Packaging": "🎁",
+               "Transport": "⛽", "Other": "⋯" };
+
+  var cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+  var chipsEl = document.getElementById("chips"), infoEl = document.getElementById("info"), playBtn = document.getElementById("play");
+  var reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var nodes = [], particles = [], bursts = [], m = 0, timer = null, W = 0, H = 0;
+
+  function fmt(n) {
+    var a = Math.abs(n);
+    var s = a >= 1000 ? (a / 1000).toFixed(a >= 10000 ? 0 : 1).replace(/\.0$/, "") + "K" : String(Math.round(a));
+    return (n < 0 ? "-" : "") + s;
+  }
+  function kes(n) { return "KES " + fmt(n); }
+  function full(n) { return "KES " + Math.round(n).toLocaleString("en-KE"); }
+  function sq(v, mx) { return Math.sqrt(Math.max(0, v) / mx); }
+
+  function build() {
+    nodes = []; particles = []; bursts = [];
+    var i = 0, k;
+    for (k in DATA.income) nodes.push({ name: k, side: "in", color: COL[k] || FALLBACK[i++ % FALLBACK.length], series: DATA.income[k], val: 0, target: 0, r: 16 });
+    for (k in DATA.costs) nodes.push({ name: k, side: "out", color: COL[k] || FALLBACK[i++ % FALLBACK.length], series: DATA.costs[k], val: 0, target: 0, r: 16 });
+    chipsEl.innerHTML = "";
+    DATA.months.forEach(function (name, idx) {
+      var b = document.createElement("button");
+      b.className = "chip"; b.textContent = name; b.setAttribute("aria-pressed", "false");
+      b.onclick = function () { stop(); setMonth(idx); };
+      chipsEl.appendChild(b);
+    });
+    setMonth(0, true);
+  }
+
+  function totals() {
+    var inc = 0, out = 0;
+    nodes.forEach(function (n) { if (n.side === "in") inc += n.target; else out += n.target; });
+    return { inc: inc, out: out, kept: inc - out };
+  }
+
+  function summary() {
+    var t = totals();
+    infoEl.textContent = DATA.months[m] + ": " + full(t.inc) + " in, " + full(t.out) + " out, " + full(t.kept) + (t.kept >= 0 ? " kept." : " short.") + " Tap a bubble for details.";
+  }
+
+  function setMonth(i, instant) {
+    m = i;
+    nodes.forEach(function (n) { n.target = n.series[m] || 0; if (instant) n.val = n.target; });
+    Array.prototype.forEach.call(chipsEl.children, function (c, idx) { c.setAttribute("aria-pressed", idx === m ? "true" : "false"); });
+    summary();
+  }
+
+  function place(arr, x) {
+    var top = H * 0.12, bot = H * 0.86;
+    arr.forEach(function (n, i) { n.x = x; n.y = arr.length === 1 ? (top + bot) / 2 : top + i * (bot - top) / (arr.length - 1); });
+  }
+  function layout() {
+    place(nodes.filter(function (n) { return n.side === "in"; }), 44);
+    place(nodes.filter(function (n) { return n.side === "out"; }), W - 44);
+  }
+  function resize() {
+    var d = window.devicePixelRatio || 1;
+    W = cv.clientWidth;
+    H = Math.round(Math.min(600, Math.max(480, W * 1.4)));
+    cv.style.height = H + "px";
+    cv.width = W * d; cv.height = H * d;
+    ctx.setTransform(d, 0, 0, d, 0, 0);
+    layout();
+  }
+
+  function bez(n, t) {
+    var x0 = n.x, y0 = n.y, x3 = n.end.x, y3 = n.end.y;
+    var x1 = x0 + (x3 - x0) * 0.55, y1 = y0, x2 = x0 + (x3 - x0) * 0.45, y2 = y3;
+    var u = 1 - t, a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+    return { x: a * x0 + b * x1 + c * x2 + d * x3, y: a * y0 + b * y1 + c * y2 + d * y3 };
+  }
+
+  function burst(n) {
+    for (var i = 0; i < 30; i++) {
+      var a = Math.random() * 6.283, s = 1 + Math.random() * 3;
+      bursts.push({ x: n.x, y: n.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1, color: n.color });
+    }
+  }
+
+  function frame(ts) {
+    ctx.clearRect(0, 0, W, H);
+    var cx = W / 2, cy = H * 0.5, R = Math.min(56, W * 0.135);
+    var inc = 0, out = 0, mx = 1, i, n;
+    for (i = 0; i < nodes.length; i++) {
+      n = nodes[i];
+      n.val += (n.target - n.val) * 0.07;
+      if (n.val > mx) mx = n.val;
+      if (n.side === "in") inc += n.val; else out += n.val;
+    }
+    var kept = inc - out;
+    for (i = 0; i < nodes.length; i++) {
+      n = nodes[i];
+      n.r = 13 + 19 * sq(n.val, mx);
+      var ang = Math.atan2(n.y - cy, n.x - cx);
+      n.end = { x: cx + Math.cos(ang) * R * 0.92, y: cy + Math.sin(ang) * R * 0.92 };
+    }
+
+    // ribbons
+    ctx.lineCap = "round";
+    for (i = 0; i < nodes.length; i++) {
+      n = nodes[i];
+      ctx.beginPath(); ctx.moveTo(n.x, n.y);
+      ctx.bezierCurveTo(n.x + (n.end.x - n.x) * 0.55, n.y, n.x + (n.end.x - n.x) * 0.45, n.end.y, n.end.x, n.end.y);
+      ctx.strokeStyle = n.color; ctx.globalAlpha = 0.22; ctx.lineWidth = 2 + 12 * sq(n.val, mx); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // flowing particles
+    if (!reduce && particles.length < 420) {
+      for (i = 0; i < nodes.length; i++) {
+        n = nodes[i];
+        if (Math.random() < 0.03 + 0.35 * (n.val / mx)) particles.push({ n: n, t: 0, sp: 0.005 + Math.random() * 0.005, o: Math.random() - 0.5 });
+      }
+    }
+    for (i = particles.length - 1; i >= 0; i--) {
+      var p = particles[i];
+      p.t += p.sp;
+      if (p.t >= 1) { particles.splice(i, 1); continue; }
+      var q = bez(p.n, p.n.side === "in" ? p.t : 1 - p.t);
+      var w = 2 + 12 * sq(p.n.val, mx);
+      ctx.globalAlpha = Math.sin(Math.PI * p.t) * 0.9;
+      ctx.fillStyle = p.n.color;
+      ctx.beginPath(); ctx.arc(q.x, q.y + p.o * w * 0.5, 1.5 + w * 0.08, 0, 6.283); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // centre bubble with a "kept" level
+    ctx.save();
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 6.283); ctx.fillStyle = "#121936"; ctx.fill(); ctx.clip();
+    var ratio = inc > 0 ? Math.min(1, Math.max(0, kept / inc)) : 0;
+    var ly = cy + R - 2 * R * ratio;
+    ctx.beginPath(); ctx.moveTo(cx - R, cy + R);
+    for (var x = -R; x <= R; x += 4) ctx.lineTo(cx + x, ly + Math.sin(x / 12 + ts / 500) * 3);
+    ctx.lineTo(cx + R, cy + R); ctx.closePath();
+    var g = ctx.createLinearGradient(0, ly, 0, cy + R);
+    g.addColorStop(0, "#a05cff"); g.addColorStop(1, "#5b2fb8");
+    ctx.fillStyle = g; ctx.fill();
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 6.283); ctx.lineWidth = 2; ctx.strokeStyle = "rgba(160,170,220,.7)"; ctx.stroke();
+    ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = "#fff"; ctx.font = "700 17px system-ui,sans-serif"; ctx.fillText(kes(kept), cx, cy - 2);
+    ctx.fillStyle = "#d5dcff"; ctx.font = "14px system-ui,sans-serif"; ctx.fillText(kept >= 0 ? "kept" : "short", cx, cy + 16);
+
+    // nodes and labels
+    for (i = 0; i < nodes.length; i++) {
+      n = nodes[i];
+      ctx.setLineDash([4, 5]); ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 7, 0, 6.283);
+      ctx.strokeStyle = n.color; ctx.globalAlpha = 0.6; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, 6.283); ctx.fillStyle = n.color; ctx.fill();
+      ctx.font = Math.round(n.r * 0.95) + "px system-ui,sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = "#0b1020"; ctx.fillText(ICON[n.name] || "•", n.x, n.y + 1);
+      ctx.textBaseline = "alphabetic";
+      var lx = n.side === "in" ? n.x + n.r + 12 : n.x - n.r - 12;
+      ctx.textAlign = n.side === "in" ? "left" : "right";
+      ctx.lineWidth = 3; ctx.strokeStyle = "#0d1426"; ctx.lineJoin = "round";
+      ctx.font = "600 14px system-ui,sans-serif"; ctx.strokeText(n.name, lx, n.y - 2); ctx.fillStyle = "#e6ecff"; ctx.fillText(n.name, lx, n.y - 2);
+      ctx.font = "13px system-ui,sans-serif"; ctx.strokeText(kes(n.val), lx, n.y + 15); ctx.fillStyle = "#8f9bc0"; ctx.fillText(kes(n.val), lx, n.y + 15);
+    }
+
+    // burst sparks
+    for (i = bursts.length - 1; i >= 0; i--) {
+      var b = bursts[i];
+      b.x += b.vx; b.y += b.vy; b.vx *= 0.96; b.vy *= 0.96; b.life -= 0.025;
+      if (b.life <= 0) { bursts.splice(i, 1); continue; }
+      ctx.globalAlpha = b.life; ctx.fillStyle = b.color;
+      ctx.beginPath(); ctx.arc(b.x, b.y, 2.5 * b.life + 0.5, 0, 6.283); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    requestAnimationFrame(frame);
+  }
+
+  cv.addEventListener("pointerdown", function (e) {
+    var r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    var hit = null;
+    nodes.forEach(function (n) { if (Math.hypot(x - n.x, y - n.y) <= n.r + 10) hit = n; });
+    var t = totals();
+    if (hit) {
+      burst(hit);
+      var pct = t.inc > 0 ? Math.round(hit.target / t.inc * 100) : 0;
+      infoEl.textContent = hit.name + ": " + full(hit.target) + (hit.side === "in" ? " - " + pct + "% of this month's sales." : " - " + pct + "% of your sales went here.");
+    } else if (Math.hypot(x - W / 2, y - H * 0.5) <= 70) {
+      infoEl.textContent = "You kept " + full(t.kept) + " in " + DATA.months[m] + (t.inc > 0 ? " (" + Math.round(t.kept / t.inc * 100) + "% of sales)." : ".");
+    }
+  });
+
+  function stop() { clearInterval(timer); timer = null; playBtn.innerHTML = "&#9654; Watch the months"; }
+  playBtn.onclick = function () {
+    if (timer) { stop(); return; }
+    if (m >= DATA.months.length - 1) setMonth(0);
+    playBtn.innerHTML = "&#10074;&#10074; Pause";
+    timer = setInterval(function () {
+      if (m >= DATA.months.length - 1) { stop(); return; }
+      setMonth(m + 1);
+    }, 2200);
+  };
+
+  window.addEventListener("resize", resize);
+  window.SellerFlow = { setData: function (d) { stop(); DATA = d; m = 0; build(); layout(); } };
+
+  build(); resize(); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
